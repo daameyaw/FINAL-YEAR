@@ -246,6 +246,22 @@ def main():
         grading = [1 if ans[q] == myIndex[q] else 0 for q in range(no_questions)]
         score = sum(grading)
 
+        # Debug values for backend terminal review
+        student_letters = [chr(int(i) + 65) for i in myIndex]
+        correct_letters = [chr(int(a) + 65) for a in ans]
+        debug_payload = {
+            "debug": "scan_result_summary",
+            "question_count": no_questions,
+            "correct_answers": correct_letters,
+            "student_answers": student_letters,
+            "grading": grading,
+            "score": int(score),
+            "correct": int(sum(grading)),
+            "total": no_questions,
+        }
+        print(json.dumps(debug_payload), file=sys.stderr)
+        sys.stderr.flush()
+
         # Validate that we detected some answers
         total_detected = sum(
             [1 for row in myPixelVal if np.max(row) > 0.01]
@@ -383,15 +399,22 @@ def main():
         img_final_small = cv2.resize(imgFinal, (350, 350))
         img_combined = np.hstack((img_corners_small, img_final_small))
 
+
         # Prepare result
+        # Convert detected indexes to letters (0 -> 'A', 1 -> 'B', ...)
+        student_letters = [chr(int(i) + 65) for i in myIndex]
+        correct_letters = [chr(int(a) + 65) for a in ans]
+
         result = {
-            "score": int(score),
-            "correct": int(sum(grading)),
-            "total": no_questions,
-            "grading": grading,
-            "image": image_to_base64(img_combined),
-            "image_type": "jpg",
-            "candidate_number": candidate_number,
+         "score": int(score),
+         "correct": int(sum(grading)),
+         "total": no_questions,
+         "grading": grading,
+         "student_answers": student_letters,
+         "correct_answers": correct_letters,
+          "image": image_to_base64(img_combined),
+          "image_type": "jpg",
+         "candidate_number": candidate_number,
         }
         print(json.dumps(result))
         sys.stdout.flush()

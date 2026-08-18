@@ -48,6 +48,10 @@ app.post("/process-image", upload.single("image"), (req, res) => {
   python.on("close", (code) => {
     cleanup(req.file.path);
 
+    if (errorData.trim()) {
+      console.log("[scan.py debug]", errorData.trim());
+    }
+
     if (code !== 0) {
       return res.status(500).json({
         error: "Processing failed",
@@ -58,6 +62,15 @@ app.post("/process-image", upload.single("image"), (req, res) => {
     try {
       const result = JSON.parse(resultData);
 
+      console.log("[backend scan summary]", {
+        score: result.score,
+        correct: result.correct,
+        total: result.total,
+        student_answers: result.student_answers || [],
+        correct_answers: result.correct_answers || [],
+        grading: result.grading || [],
+      });
+
       if (result.image) {
         // Convert base64 to data URL
         result.image = `data:image/${result.image_type};base64,${result.image}`;
@@ -66,6 +79,7 @@ app.post("/process-image", upload.single("image"), (req, res) => {
 
       res.json(result);
     } catch (e) {
+      console.error("[backend parse error]", e.message, "Raw output:", resultData);
       res.status(500).json({ error: "Invalid processing output" });
     }
   });

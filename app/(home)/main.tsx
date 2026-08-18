@@ -39,10 +39,22 @@ interface ExamResult {
   correct: number;
   total: number;
   grading: boolean[];
+  student_answers?: string[];   // new
+  correct_answers?: string[];   // new
   image: string;
   image_type: string;
   candidate_number?: string;
 }
+
+/*interface ExamResult {
+  score: number;
+  correct: number;
+  total: number;
+  grading: boolean[];
+  image: string;
+  image_type: string;
+  candidate_number?: string;
+}*/
 
 interface StoredExamResult {
   id: string;
@@ -187,13 +199,36 @@ export default function App() {
       return;
     }
 
-    if (!answers || answers.length !== Number.parseInt(questions)) {
+    const qNum = Number.parseInt(questions);
+
+    // Try the new per-question inputs first
+    let answerKeyArray: string[] = [];
+
+    // If answerInputs are filled and valid, use them
+    if (
+      Array.isArray(answerInputs) &&
+      answerInputs.length >= qNum &&
+      answerInputs.slice(0, qNum).every(a => a && /^[A-Ea-e]$/.test(a))
+    ) {
+      answerKeyArray = answerInputs.slice(0, qNum).map(a => a.toUpperCase());
+    }
+    // Else fall back to the old single-string input
+    else if (answers && answers.length === qNum && /^[A-Ea-e]+$/.test(answers)) {
+      answerKeyArray = answers.toUpperCase().split('');
+    } else {
+      Alert.alert("Error", `Please provide exactly ${questions} answers (A-E).`);
+      return;
+    }
+
+    // Keep the answers state consistent (optional, helps other code paths)
+    setAnswers(answerKeyArray.join(''));
+    /*if (!answers || answers.length !== Number.parseInt(questions)) {
       Alert.alert(
         "Error",
         `Please provide exactly ${questions} answers (A-E).`
       );
       return;
-    }
+    }*/
 
     setScanMode(mode);
     setShowSetup(false);
@@ -278,14 +313,30 @@ export default function App() {
   };
 
   const processImage = async (imageUri: string) => {
-    const convertedAnswers = answers
+    const qNum = Number.parseInt(questions);
+
+      // prefer answerInputs if available
+      let keyArray: string[] = [];
+      if (Array.isArray(answerInputs) && answerInputs.length >= qNum) {
+        keyArray = answerInputs.slice(0, qNum).map(a => (a || '').toUpperCase());
+      } else if (answers) {
+        keyArray = answers.toUpperCase().split('').slice(0, qNum);
+      }
+
+    const convertedAnswers = keyArray
+      .map((ans) => {
+      if (ans >= "A" && ans <= "E") return ans.charCodeAt(0) - 65;
+      return null;
+      })
+      .filter((ans) => ans !== null);
+    /*const convertedAnswers = answers
       .toUpperCase()
       .split("")
       .map((ans) => {
         if (ans >= "A" && ans <= "E") return ans.charCodeAt(0) - 65;
         return null;
       })
-      .filter((ans) => ans !== null);
+      .filter((ans) => ans !== null);*/
 
     const formData = new FormData();
     formData.append("image", {
@@ -298,7 +349,7 @@ export default function App() {
 
     try {
       const response = await axios.post(
-        "http://10.215.232.11:3000/process-image",
+        "http://172.26.42.105:3000/process-image",
         formData,
         {
           headers: { "Content-Type": "multipart/form-data" },
@@ -883,13 +934,22 @@ export default function App() {
                   {result.grading &&
                     Array.isArray(result.grading) &&
                     result.grading.map((isCorrect, index) => {
-                      const correctAnswers = answers.toUpperCase().split("");
+                      // Prefer server-provided correct/student answers when available
+                      const correctAnswers =
+                        Array.isArray(result.correct_answers) && result.correct_answers.length
+                         ? result.correct_answers
+                          : (Array.isArray(answerInputs) && answerInputs.length > 0)
+                           ? answerInputs.map(a => (a || '-').toUpperCase())
+                            : (answers ? answers.toUpperCase().split('') : []);
+
+                      const studentAnswers = Array.isArray(result.student_answers) && result.student_answers.length
+                        ? result.student_answers
+                        : (Array.isArray(answerInputs) && answerInputs.length > 0
+                          ? answerInputs.map(a => (a || "-").toUpperCase())
+                          : (answers ? answers.toUpperCase().split("") : []));
+
                       const correctAnswer = correctAnswers[index] || "-";
-                      const studentAnswer = isCorrect
-                        ? correctAnswer
-                        : correctAnswer === "A"
-                        ? "B"
-                        : "A";
+                      const studentAnswer = studentAnswers[index] || "-";
 
                       return (
                         <View
