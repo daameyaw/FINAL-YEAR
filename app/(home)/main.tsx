@@ -94,6 +94,9 @@ interface ImageAsset {
 
 const { width, height } = Dimensions.get("window");
 
+// PC Wi-Fi IPv4 — phone and this computer must be on the same network
+const BACKEND_URL = "http://192.168.0.114:3000";
+
 export default function App() {
   const [image, setImage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -349,7 +352,7 @@ export default function App() {
 
     try {
       const response = await axios.post(
-        "http://172.26.42.105:3000/process-image",
+        `${BACKEND_URL}/process-image`,
         formData,
         {
           headers: { "Content-Type": "multipart/form-data" },
