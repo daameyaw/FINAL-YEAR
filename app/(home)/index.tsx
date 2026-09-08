@@ -3,6 +3,7 @@ import * as FileSystem from "expo-file-system";
 import { LinearGradient } from "expo-linear-gradient";
 import * as MediaLibrary from "expo-media-library";
 import { router } from "expo-router";
+import { AppTheme } from "@/constants/Colors";
 import {
   Alert,
   Dimensions,
@@ -114,10 +115,10 @@ export default function GetStartedScreen() {
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#1a365d" />
+      <StatusBar barStyle="light-content" backgroundColor={AppTheme.statusBar} />
 
       <LinearGradient
-        colors={["#0f172a", "#1e293b", "#334155"]}
+        colors={[...AppTheme.gradientLanding]}
         style={styles.gradient}
       >
         <ScrollView
@@ -186,7 +187,7 @@ export default function GetStartedScreen() {
               activeOpacity={0.8}
             >
               <LinearGradient
-                colors={["#4299e1", "#3182ce"]}
+                colors={[...AppTheme.primary]}
                 style={styles.buttonGradient}
               >
                 <Text style={styles.buttonText}>📥 Download Sheets</Text>
@@ -199,7 +200,7 @@ export default function GetStartedScreen() {
               activeOpacity={0.8}
             >
               <LinearGradient
-                colors={["#48bb78", "#38a169"]}
+                colors={[...AppTheme.accent]}
                 style={styles.buttonGradient}
               >
                 <Text style={styles.buttonText}>Get Started</Text>

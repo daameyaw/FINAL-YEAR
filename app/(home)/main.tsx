@@ -11,6 +11,7 @@ import * as ImageManipulator from "expo-image-manipulator";
 import * as ImagePicker from "expo-image-picker";
 import { LinearGradient } from "expo-linear-gradient";
 import { router } from "expo-router";
+import { AppTheme } from "@/constants/Colors";
 import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -196,7 +197,7 @@ export default function App() {
     pulse();
   }, []);
 
-  const startScanning = (mode: "camera" | "upload") => {
+  const startScanning = () => {
     if (!questions || questions < 1 || questions > 60) {
       Alert.alert("Error", "Please enter valid number of questions (1-60)");
       return;
@@ -233,15 +234,9 @@ export default function App() {
       return;
     }*/
 
-    setScanMode(mode);
+    setScanMode("camera");
     setShowSetup(false);
-
-    if (mode === "camera") {
-      openCamera();
-    } else {
-      // Directly open gallery for upload mode
-      pickImageFromGallery();
-    }
+    openCamera();
   };
 
   const openCamera = async () => {
@@ -817,7 +812,7 @@ export default function App() {
               onPress={scanAgain}
             >
               <LinearGradient
-                colors={["#4299e1", "#3182ce"]}
+                colors={[...AppTheme.primary]}
                 style={styles.briefButtonGradient}
               >
                 <Text style={styles.briefButtonText}>Scan Again</Text>
@@ -829,7 +824,7 @@ export default function App() {
               onPress={() => setShowDetailedResults(true)}
             >
               <LinearGradient
-                colors={["#48bb78", "#38a169"]}
+                colors={[...AppTheme.accent]}
                 style={styles.briefButtonGradient}
               >
                 <Text style={styles.briefButtonText}>View Details</Text>
@@ -848,7 +843,7 @@ export default function App() {
       <Modal visible={showDetailedResults} animationType="slide">
         <View style={styles.detailedResultsContainer}>
           <LinearGradient
-            colors={["#1a365d", "#2d5a87", "#4299e1"]}
+            colors={[...AppTheme.gradient]}
             style={styles.detailedGradient}
           >
             <View style={styles.detailedHeader}>
@@ -865,7 +860,7 @@ export default function App() {
             <ScrollView style={styles.detailedScrollView}>
               <View style={styles.detailedScoreContainer}>
                 <LinearGradient
-                  colors={["#4299e1", "#3182ce"]}
+                  colors={[...AppTheme.primary]}
                   style={styles.detailedScoreBox}
                 >
                   <Text style={styles.detailedScoreText}>{result.score}</Text>
@@ -878,7 +873,7 @@ export default function App() {
                   </Text>
                   <View style={styles.detailedProgressBar}>
                     <LinearGradient
-                      colors={["#48bb78", "#38a169"]}
+                      colors={[...AppTheme.accent]}
                       style={[
                         styles.detailedProgressFill,
                         {
@@ -986,7 +981,7 @@ export default function App() {
                             <LinearGradient
                               colors={
                                 isCorrect
-                                  ? ["#48bb78", "#38a169"]
+                                  ? [...AppTheme.accent]
                                   : ["#f56565", "#e53e3e"]
                               }
                               style={styles.statusIndicator}
@@ -1026,7 +1021,7 @@ export default function App() {
       <Modal visible={showAnalysis} animationType="slide">
         <View style={styles.analysisContainer}>
           <LinearGradient
-            colors={["#1a365d", "#2d5a87", "#4299e1"]}
+            colors={[...AppTheme.gradient]}
             style={styles.analysisGradient}
           >
             {/* Header */}
@@ -1055,13 +1050,13 @@ export default function App() {
                 placeholderTextColor="#888"
               />
               <TouchableOpacity
-                style={{ backgroundColor: '#4299e1', borderRadius: 8, padding: 10 }}
+                style={{ backgroundColor: AppTheme.primary[0], borderRadius: 8, padding: 10 }}
                 onPress={handleSearch}
               >
                 <Text style={{ color: 'white', fontWeight: 'bold' }}>Search</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={{ marginLeft: 8, backgroundColor: '#ed8936', borderRadius: 8, padding: 10 }}
+                style={{ marginLeft: 8, backgroundColor: AppTheme.warning[0], borderRadius: 8, padding: 10 }}
                 onPress={() => { setSearchQuery(''); setFilteredExams(null); }}
               >
                 <Text style={{ color: 'white', fontWeight: 'bold' }}>Reset</Text>
@@ -1069,7 +1064,7 @@ export default function App() {
             </View>
             {/* Save Analysis Button */}
             <TouchableOpacity
-              style={{ margin: 16, alignSelf: 'center', backgroundColor: '#48bb78', borderRadius: 8, padding: 12 }}
+              style={{ margin: 16, alignSelf: 'center', backgroundColor: AppTheme.accent[0], borderRadius: 8, padding: 12 }}
               onPress={saveAnalysisToDevice}
             >
               <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 16 }}>Save Analysis to Device</Text>
@@ -1306,7 +1301,7 @@ export default function App() {
       <Modal visible={showManualUpload} animationType="slide">
         <View style={styles.uploadContainer}>
           <LinearGradient
-            colors={["#1a365d", "#2d5a87", "#4299e1"]}
+            colors={[...AppTheme.gradient]}
             style={styles.uploadGradient}
           >
             <View style={styles.uploadHeader}>
@@ -1390,9 +1385,9 @@ export default function App() {
   const renderSetup = () => {
     return (
       <View style={styles.safeArea}>
-        <StatusBar barStyle="light-content" backgroundColor="#1a365d" />
+        <StatusBar barStyle="light-content" backgroundColor={AppTheme.statusBar} />
         <LinearGradient
-          colors={["#1a365d", "#2d5a87", "#4299e1"]}
+          colors={[...AppTheme.gradient]}
           style={styles.gradient}
         >
           <KeyboardAvoidingView style={styles.keyboardView} behavior="padding">
@@ -1443,41 +1438,22 @@ export default function App() {
                 </View>
 
                 <View style={styles.scanModeSection}>
-                  <Text style={styles.sectionTitle}>
-                    📷 Choose Scanning Mode
-                  </Text>
+                  <Text style={styles.sectionTitle}>📷 Start Scanning</Text>
 
                   <View style={styles.modeButtonsContainer}>
                     <TouchableOpacity
                       style={styles.modeButton}
-                      onPress={() => startScanning("camera")}
+                      onPress={startScanning}
                       activeOpacity={0.8}
                     >
                       <LinearGradient
-                        colors={["#4299e1", "#3182ce"]}
+                        colors={[...AppTheme.primary]}
                         style={styles.modeButtonGradient}
                       >
                         <Text style={styles.modeButtonIcon}>📷</Text>
                         <Text style={styles.modeButtonTitle}>Camera Mode</Text>
                         <Text style={styles.modeButtonText}>
                           Use live camera to scan answer sheets
-                        </Text>
-                      </LinearGradient>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                      style={styles.modeButton}
-                      onPress={() => startScanning("upload")}
-                      activeOpacity={0.8}
-                    >
-                      <LinearGradient
-                        colors={["#48bb78", "#38a169"]}
-                        style={styles.modeButtonGradient}
-                      >
-                        <Text style={styles.modeButtonIcon}>📁</Text>
-                        <Text style={styles.modeButtonTitle}>Upload Mode</Text>
-                        <Text style={styles.modeButtonText}>
-                          Select existing images from gallery
                         </Text>
                       </LinearGradient>
                     </TouchableOpacity>
@@ -1496,7 +1472,7 @@ export default function App() {
                     activeOpacity={0.8}
                   >
                     <LinearGradient
-                      colors={["#ed8936", "#dd6b20"]}
+                      colors={[...AppTheme.warning]}
                       style={styles.analysisButtonGradient}
                     >
                       <Text style={styles.analysisButtonIcon}>📈</Text>
@@ -1833,7 +1809,7 @@ const styles = StyleSheet.create({
   briefPercentageText: {
     fontSize: 24,
     fontWeight: "bold",
-    color: "#48bb78",
+    color: AppTheme.accent[0],
   },
   briefButtonsContainer: {
     flexDirection: "row",
@@ -2239,7 +2215,7 @@ const styles = StyleSheet.create({
   recentExamPercentage: {
     fontSize: 16,
     fontWeight: "bold",
-    color: "#48bb78",
+    color: AppTheme.accent[0],
   },
   recentExamGrade: {
     fontSize: 16,
