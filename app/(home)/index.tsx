@@ -2,8 +2,9 @@ import { Asset } from "expo-asset";
 import * as FileSystem from "expo-file-system";
 import { LinearGradient } from "expo-linear-gradient";
 import * as MediaLibrary from "expo-media-library";
-import { router } from "expo-router";
+import { router, type Href } from "expo-router";
 import { AppTheme } from "@/constants/Colors";
+import { useAuth } from "@/context/AuthContext";
 import {
   Alert,
   Dimensions,
@@ -18,6 +19,8 @@ import {
 const { width } = Dimensions.get("window");
 
 export default function GetStartedScreen() {
+  const { user } = useAuth();
+
   const features = [
     {
       icon: "📷",
@@ -42,7 +45,11 @@ export default function GetStartedScreen() {
   ];
 
   function onGetStarted() {
-    router.push("/(home)/main");
+    if (user) {
+      router.push("/(home)/main");
+    } else {
+      router.push("/(auth)/login" as Href);
+    }
   }
 
   const downloadSheets = async () => {

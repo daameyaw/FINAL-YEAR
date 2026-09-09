@@ -10,8 +10,21 @@ import * as FileSystem from 'expo-file-system';
 import * as ImageManipulator from "expo-image-manipulator";
 import * as ImagePicker from "expo-image-picker";
 import { LinearGradient } from "expo-linear-gradient";
-import { router } from "expo-router";
+import { router, type Href } from "expo-router";
 import { AppTheme } from "@/constants/Colors";
+import {
+  EXAM_LEVELS,
+  EXAM_TERMS,
+  type ExamLevel,
+  type ExamTerm,
+} from "@/constants/ExamLevels";
+import { useAuth } from "@/context/AuthContext";
+import {
+  uploadClassResultsToDatabase,
+  fetchUploadedResults,
+  labelsMatch,
+  type CloudScanResult,
+} from "@/lib/resultsService";
 import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -60,6 +73,8 @@ interface ExamResult {
 interface StoredExamResult {
   id: string;
   timestamp: number;
+  level: string;
+  term: string;
   studentName?: string;
   examTitle?: string;
   score: number;
@@ -70,6 +85,8 @@ interface StoredExamResult {
   grading: boolean[];
   image: string;
   candidate_number?: string;
+  uploadedToCloud?: boolean;
+  cloudUploadedAt?: number;
 }
 
 interface AnalysisData {
@@ -97,12 +114,32 @@ const { width, height } = Dimensions.get("window");
 
 // PC Wi-Fi IPv4 — phone and this computer must be on the same network
 const BACKEND_URL = "http://192.168.0.114:3000";
+const DEFAULT_QUESTION_COUNT = 40;
+const ANSWER_OPTIONS = ["A", "B", "C", "D", "E"] as const;
+
+function createAnswerKeySlots(
+  count: number,
+  existing: string[] = [],
+  fillDefaultLetters = false
+): string[] {
+  return Array.from({ length: count }, (_, index) => {
+    const current = existing[index]?.toUpperCase();
+    if (current && /^[A-E]$/.test(current)) {
+      return current;
+    }
+    if (fillDefaultLetters) {
+      return ANSWER_OPTIONS[index % ANSWER_OPTIONS.length];
+    }
+    return "";
+  });
+}
 
 export default function App() {
+  const { user, loading: authLoading, logOut } = useAuth();
   const [image, setImage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ExamResult | null>(null);
-  const [questions, setQuestions] = useState<any>("");
+  const [questions, setQuestions] = useState(String(DEFAULT_QUESTION_COUNT));
   const [answers, setAnswers] = useState("");
   const [viewImage, setViewImage] = useState(false);
   const [viewSelectedImage, setViewSelectedImage] = useState(false);
@@ -119,7 +156,17 @@ export default function App() {
   const [viewAnalysisImage, setViewAnalysisImage] = useState<null | string>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [filteredExams, setFilteredExams] = useState<StoredExamResult[] | null>(null);
-  const [answerInputs, setAnswerInputs] = useState<string[]>([]);
+  const [answerInputs, setAnswerInputs] = useState<string[]>(() =>
+    createAnswerKeySlots(DEFAULT_QUESTION_COUNT, [], true)
+  );
+  const [selectedLevel, setSelectedLevel] = useState<ExamLevel | "">("");
+  const [selectedTerm, setSelectedTerm] = useState<ExamTerm | "">("");
+  const [analysisLevel, setAnalysisLevel] = useState<ExamLevel | "">("");
+  const [analysisTerm, setAnalysisTerm] = useState<ExamTerm | "">("");
+  const [uploadingToCloud, setUploadingToCloud] = useState(false);
+  const [showCloudResults, setShowCloudResults] = useState(false);
+  const [cloudResults, setCloudResults] = useState<CloudScanResult[]>([]);
+  const [loadingCloudResults, setLoadingCloudResults] = useState(false);
   const cameraRef = useRef<CameraView>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
@@ -198,6 +245,14 @@ export default function App() {
   }, []);
 
   const startScanning = () => {
+    if (!selectedLevel) {
+      Alert.alert("Error", "Please select a class level.");
+      return;
+    }
+    if (!selectedTerm) {
+      Alert.alert("Error", "Please select a term.");
+      return;
+    }
     if (!questions || questions < 1 || questions > 60) {
       Alert.alert("Error", "Please enter valid number of questions (1-60)");
       return;
@@ -405,6 +460,139 @@ export default function App() {
     setImage(null);
   };
 
+  const getResultsForClass = (
+    results: StoredExamResult[],
+    level: string,
+    term: string
+  ) =>
+    results.filter(
+      (result) =>
+        labelsMatch(result.level, level) &&
+        labelsMatch(result.term, term) &&
+        typeof result.percentage === "number" &&
+        !isNaN(result.percentage) &&
+        isFinite(result.percentage) &&
+        result.percentage >= 0 &&
+        result.percentage <= 100 &&
+        typeof result.score === "number" &&
+        typeof result.total === "number" &&
+        result.total > 0
+    );
+
+  const classResultsCount = selectedLevel && selectedTerm
+    ? getResultsForClass(storedResults, selectedLevel, selectedTerm).length
+    : 0;
+
+  const pendingUploadCount =
+    selectedLevel && selectedTerm
+      ? getResultsForClass(storedResults, selectedLevel, selectedTerm).filter(
+          (result) => !result.uploadedToCloud
+        ).length
+      : 0;
+
+  const markResultsAsUploaded = async (
+    level: string,
+    term: string,
+    resultIds: string[]
+  ) => {
+    const updatedResults = storedResults.map((result) =>
+      resultIds.includes(result.id)
+        ? {
+            ...result,
+            uploadedToCloud: true,
+            cloudUploadedAt: Date.now(),
+          }
+        : result
+    );
+
+    await AsyncStorage.setItem("examResults", JSON.stringify(updatedResults));
+    setStoredResults(updatedResults);
+  };
+
+  const handleUploadToDatabase = async (
+    level: string,
+    term: string,
+    fromAnalysis = false
+  ) => {
+    if (!user) {
+      Alert.alert("Sign In Required", "Please sign in to upload results.");
+      return;
+    }
+
+    if (!level || !term) {
+      Alert.alert(
+        "Select Class & Term",
+        "Please choose a class level and term before uploading."
+      );
+      return;
+    }
+
+    const classResults = getResultsForClass(storedResults, level, term);
+    const pending = classResults.filter((result) => !result.uploadedToCloud);
+
+    if (classResults.length === 0) {
+      Alert.alert(
+        "No Results",
+        `There are no scanned results for ${level}, ${term}.`
+      );
+      return;
+    }
+
+    if (pending.length === 0) {
+      Alert.alert(
+        "Already Uploaded",
+        `All ${classResults.length} result(s) for ${level}, ${term} are already in the database.`
+      );
+      return;
+    }
+
+    Alert.alert(
+      "Upload to Database",
+      `Upload ${pending.length} scanned result(s) for ${level}, ${term}?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Upload",
+          onPress: async () => {
+            setUploadingToCloud(true);
+            try {
+              const { uploaded } = await uploadClassResultsToDatabase(
+                user,
+                level,
+                term,
+                storedResults
+              );
+
+              await markResultsAsUploaded(
+                level,
+                term,
+                pending.map((result) => result.id)
+              );
+
+              if (fromAnalysis && analysisLevel && analysisTerm) {
+                refreshAnalysisForFilters(analysisLevel, analysisTerm);
+              }
+
+              Alert.alert(
+                "Upload Complete",
+                `Saved ${uploaded} result(s) under ${level} → ${term} in Firebase.`
+              );
+            } catch (error) {
+              Alert.alert(
+                "Upload Failed",
+                error instanceof Error
+                  ? error.message
+                  : "Could not upload results. Check your internet and Firebase setup."
+              );
+            } finally {
+              setUploadingToCloud(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   // Storage and Analysis Functions
   const calculateGrade = (percentage: number): string => {
     if (percentage >= 80) return "A";
@@ -417,6 +605,11 @@ export default function App() {
 
   const saveResult = async (examResult: ExamResult, forceSave = false) => {
     try {
+      if (!selectedLevel || !selectedTerm) {
+        console.error("Missing class level or term when saving result");
+        return;
+      }
+
       // Validate the exam result before saving
       if (
         !examResult ||
@@ -443,6 +636,8 @@ export default function App() {
       const storedResult: StoredExamResult = {
         id: Date.now().toString(),
         timestamp: Date.now(),
+        level: selectedLevel,
+        term: selectedTerm,
         score: examResult.score,
         correct: examResult.correct,
         total: examResult.total,
@@ -458,19 +653,21 @@ export default function App() {
         ? JSON.parse(existingResults)
         : [];
 
-      // Duplicate candidate_number check (if present)
+      // Duplicate candidate_number check within same class and term
       if (
         examResult.candidate_number &&
         !forceSave &&
         results.some(
           (r) =>
             r.candidate_number &&
-            r.candidate_number === examResult.candidate_number
+            r.candidate_number === examResult.candidate_number &&
+            r.level === selectedLevel &&
+            r.term === selectedTerm
         )
       ) {
         Alert.alert(
           "Duplicate Index Number",
-          `A result with index number "${examResult.candidate_number}" already exists in analysis. Do you want to discard this scan or save it anyway?`,
+          `A result with index number "${examResult.candidate_number}" already exists for ${selectedLevel}, ${selectedTerm}. Do you want to discard this scan or save it anyway?`,
           [
             {
               text: "Discard",
@@ -540,8 +737,11 @@ export default function App() {
     }
   };
 
-  const generateAnalysis = (): AnalysisData => {
-    if (storedResults.length === 0) {
+  const generateAnalysis = (
+    level: string = analysisLevel,
+    term: string = analysisTerm
+  ): AnalysisData => {
+    if (!level || !term) {
       return {
         totalExams: 0,
         averageScore: 0,
@@ -558,16 +758,7 @@ export default function App() {
       };
     }
 
-    // Filter out any invalid results that might have been saved
-    const validResults = storedResults.filter(
-      (result) =>
-        result &&
-        typeof result.percentage === "number" &&
-        !isNaN(result.percentage) &&
-        isFinite(result.percentage) &&
-        result.percentage >= 0 &&
-        result.percentage <= 100
-    );
+    const validResults = getResultsForClass(storedResults, level, term);
 
     if (validResults.length === 0) {
       return {
@@ -610,9 +801,7 @@ export default function App() {
       }
     });
 
-    const recentExams = validResults
-      .sort((a, b) => b.timestamp - a.timestamp)
-      .slice(0, 10);
+    const recentExams = validResults.sort((a, b) => b.timestamp - a.timestamp);
 
     return {
       totalExams,
@@ -624,26 +813,53 @@ export default function App() {
   };
 
   const showAnalysisModal = () => {
-    const analysis = generateAnalysis();
+    if (!selectedLevel || !selectedTerm) {
+      Alert.alert("Select Class & Term", "Please choose a class level and term before viewing analysis.");
+      return;
+    }
+    setAnalysisLevel(selectedLevel);
+    setAnalysisTerm(selectedTerm);
+    setSearchQuery("");
+    setFilteredExams(null);
+    const analysis = generateAnalysis(selectedLevel, selectedTerm);
     setAnalysisData(analysis);
     setShowAnalysis(true);
   };
 
+  const refreshAnalysisForFilters = (level: string, term: string) => {
+    setFilteredExams(null);
+    setSearchQuery("");
+    setAnalysisData(generateAnalysis(level, term));
+  };
+
   const clearAllResults = async () => {
+    if (!analysisLevel || !analysisTerm) return;
+
     Alert.alert(
-      "Clear All Results",
-      "Are you sure you want to delete all stored exam results? This action cannot be undone.",
+      "Clear Class Results",
+      `Delete all stored results for ${analysisLevel}, ${analysisTerm}? This cannot be undone.`,
       [
         { text: "Cancel", style: "cancel" },
         {
-          text: "Clear All",
+          text: "Clear",
           style: "destructive",
           onPress: async () => {
             try {
-              await AsyncStorage.removeItem("examResults");
-              setStoredResults([]);
-              setAnalysisData(null);
-              Alert.alert("Success", "All results have been cleared.");
+              const remaining = storedResults.filter(
+                (result) =>
+                  result.level !== analysisLevel || result.term !== analysisTerm
+              );
+              await AsyncStorage.setItem(
+                "examResults",
+                JSON.stringify(remaining)
+              );
+              setStoredResults(remaining);
+              setAnalysisData(generateAnalysis(analysisLevel, analysisTerm));
+              setFilteredExams(null);
+              Alert.alert(
+                "Success",
+                `Results cleared for ${analysisLevel}, ${analysisTerm}.`
+              );
             } catch (error) {
               Alert.alert("Error", "Failed to clear results.");
             }
@@ -668,7 +884,7 @@ export default function App() {
     };
     // Build CSV rows with base64 images
     const csvRows = [
-      'Index Number,Score,Total,Percentage,Grade,Date,ImageFile',
+      "Level,Term,Index Number,Score,Total,Percentage,Grade,Date,ImageFile",
     ];
     for (let i = 0; i < analysisData.recentExams.length; i++) {
       const exam = analysisData.recentExams[i];
@@ -684,6 +900,8 @@ export default function App() {
       try {
         await FileSystem.copyAsync({ from: exam.image, to: imageFilePath });
         csvRows.push([
+          exam.level || analysisLevel,
+          exam.term || analysisTerm,
           indexNumber,
           exam.score,
           exam.total,
@@ -694,6 +912,8 @@ export default function App() {
         ].join(','));
       } catch {
         csvRows.push([
+          exam.level || analysisLevel,
+          exam.term || analysisTerm,
           indexNumber,
           exam.score,
           exam.total,
@@ -718,10 +938,30 @@ export default function App() {
     }
   };
 
+  useEffect(() => {
+    if (!authLoading && !user) {
+      router.replace("/(auth)/login" as Href);
+    }
+  }, [user, authLoading]);
+
   // Load stored results on component mount
   useEffect(() => {
     loadStoredResults();
   }, []);
+
+  const handleSignOut = async () => {
+    Alert.alert("Sign Out", "Are you sure you want to sign out?", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Sign Out",
+        style: "destructive",
+        onPress: async () => {
+          await logOut();
+          router.replace("/(auth)/login" as Href);
+        },
+      },
+    ]);
+  };
 
   // Save result when new result is available
   useEffect(() => {
@@ -1012,6 +1252,188 @@ export default function App() {
     );
   };
 
+  const openUploadedResults = async () => {
+    if (!user) {
+      Alert.alert("Sign In Required", "Please sign in to view uploaded results.");
+      return;
+    }
+
+    setShowCloudResults(true);
+    setLoadingCloudResults(true);
+
+    try {
+      const results = await fetchUploadedResults(user.uid);
+      setCloudResults(results);
+    } catch (error) {
+      setShowCloudResults(false);
+      Alert.alert(
+        "Could Not Load Results",
+        error instanceof Error
+          ? error.message
+          : "Failed to fetch uploaded results from Firebase."
+      );
+    } finally {
+      setLoadingCloudResults(false);
+    }
+  };
+
+  const refreshUploadedResults = async () => {
+    if (!user) return;
+
+    setLoadingCloudResults(true);
+    try {
+      const results = await fetchUploadedResults(user.uid);
+      setCloudResults(results);
+    } catch (error) {
+      Alert.alert(
+        "Could Not Load Results",
+        error instanceof Error
+          ? error.message
+          : "Failed to refresh uploaded results."
+      );
+    } finally {
+      setLoadingCloudResults(false);
+    }
+  };
+
+  const renderUploadedResultsModal = () => {
+    const grouped = cloudResults.reduce<
+      Record<string, { level: string; term: string; results: CloudScanResult[] }>
+    >((acc, result) => {
+      const key = `${result.level}|${result.term}`;
+      if (!acc[key]) {
+        acc[key] = { level: result.level, term: result.term, results: [] };
+      }
+      acc[key].results.push(result);
+      return acc;
+    }, {});
+
+    const groups = Object.values(grouped).sort((a, b) => {
+      const levelDiff =
+        EXAM_LEVELS.indexOf(a.level as ExamLevel) -
+        EXAM_LEVELS.indexOf(b.level as ExamLevel);
+      if (levelDiff !== 0) return levelDiff;
+      return (
+        EXAM_TERMS.indexOf(a.term as ExamTerm) -
+        EXAM_TERMS.indexOf(b.term as ExamTerm)
+      );
+    });
+
+    return (
+      <Modal visible={showCloudResults} animationType="slide">
+        <View style={styles.analysisContainer}>
+          <LinearGradient
+            colors={[...AppTheme.gradient]}
+            style={styles.analysisGradient}
+          >
+            <View style={styles.analysisHeader}>
+              <TouchableOpacity
+                style={styles.closeButton}
+                onPress={() => setShowCloudResults(false)}
+              >
+                <Text style={styles.closeButtonText}>✕</Text>
+              </TouchableOpacity>
+              <Text style={styles.analysisTitle}>Uploaded Results</Text>
+              <TouchableOpacity
+                style={styles.clearButton}
+                onPress={refreshUploadedResults}
+                disabled={loadingCloudResults}
+              >
+                <Text style={styles.clearButtonText}>Refresh</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.analysisFilterSection}>
+              <Text style={styles.analysisFilterLabel}>
+                {cloudResults.length} uploaded result(s), grouped by class and term
+              </Text>
+            </View>
+
+            <View style={styles.cloudResultsBody}>
+              {loadingCloudResults ? (
+                <View style={styles.cloudLoadingContainer}>
+                  <ActivityIndicator size="large" color="#fff" />
+                  <Text style={styles.cloudLoadingText}>Loading from Firebase...</Text>
+                </View>
+              ) : (
+                <ScrollView
+                  style={styles.analysisScrollView}
+                  showsVerticalScrollIndicator={false}
+                  contentContainerStyle={{ paddingBottom: 40 }}
+                >
+                  {groups.length > 0 ? (
+                    groups.map((group) => (
+                      <View key={`${group.level}-${group.term}`} style={styles.cloudGroupSection}>
+                        <Text style={styles.cloudGroupTitle}>
+                          {group.level} • {group.term} ({group.results.length})
+                        </Text>
+                        {group.results.map((exam) => (
+                          <View key={exam.id} style={styles.recentExamCard}>
+                            <View style={styles.recentExamHeader}>
+                              <View style={{ flex: 1 }}>
+                                <Text style={styles.recentExamNumber}>
+                                  {exam.candidate_number
+                                    ? `Index: ${exam.candidate_number}`
+                                    : `Scan ${exam.localId}`}
+                                </Text>
+                                <Text style={styles.recentExamMeta}>
+                                  Uploaded{" "}
+                                  {exam.uploadedAt
+                                    ? exam.uploadedAt.toLocaleString()
+                                    : "—"}
+                                </Text>
+                              </View>
+                              <Text style={styles.recentExamDate}>
+                                {exam.scannedAt.toLocaleDateString()}
+                              </Text>
+                            </View>
+                            <View style={styles.recentExamStats}>
+                              <View style={styles.recentExamStat}>
+                                <Text style={styles.recentExamScore}>
+                                  {exam.score}/{exam.total}
+                                </Text>
+                                <Text style={styles.recentExamLabel}>Score</Text>
+                              </View>
+                              <View style={styles.recentExamStat}>
+                                <Text style={styles.recentExamPercentage}>
+                                  {Number(exam.percentage || 0).toFixed(1)}%
+                                </Text>
+                                <Text style={styles.recentExamLabel}>Percentage</Text>
+                              </View>
+                              <View style={styles.recentExamStat}>
+                                <Text
+                                  style={[
+                                    styles.recentExamGrade,
+                                    { color: getGradeColor(exam.grade) },
+                                  ]}
+                                >
+                                  {exam.grade}
+                                </Text>
+                                <Text style={styles.recentExamLabel}>Grade</Text>
+                              </View>
+                            </View>
+                          </View>
+                        ))}
+                      </View>
+                    ))
+                  ) : (
+                    <View style={styles.emptyState}>
+                      <Text style={styles.emptyStateText}>No uploaded results yet</Text>
+                      <Text style={styles.emptyStateSubtext}>
+                        Upload scanned results from the setup screen to see them here,
+                        grouped by class and term.
+                      </Text>
+                    </View>
+                  )}
+                </ScrollView>
+              )}
+            </View>
+          </LinearGradient>
+        </View>
+      </Modal>
+    );
+  };
+
   const renderAnalysisModal = () => {
     if (!analysisData) return null;
 
@@ -1037,8 +1459,76 @@ export default function App() {
                 style={styles.clearButton}
                 onPress={clearAllResults}
               >
-                <Text style={styles.clearButtonText}>Clear All</Text>
+                <Text style={styles.clearButtonText}>Clear Class</Text>
               </TouchableOpacity>
+            </View>
+
+            <View style={styles.analysisFilterSection}>
+              <Text style={styles.analysisFilterLabel}>
+                Viewing: {analysisLevel || "—"}, {analysisTerm || "—"}
+              </Text>
+              <Text style={styles.analysisFilterSubLabel}>Class Level</Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.chipRow}
+              >
+                {EXAM_LEVELS.map((level) => (
+                  <TouchableOpacity
+                    key={level}
+                    style={[
+                      styles.chip,
+                      analysisLevel === level && styles.chipSelected,
+                    ]}
+                    onPress={() => {
+                      setAnalysisLevel(level);
+                      if (analysisTerm) {
+                        refreshAnalysisForFilters(level, analysisTerm);
+                      }
+                    }}
+                  >
+                    <Text
+                      style={[
+                        styles.chipText,
+                        analysisLevel === level && styles.chipTextSelected,
+                      ]}
+                    >
+                      {level}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+              <Text style={styles.analysisFilterSubLabel}>Term</Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.chipRow}
+              >
+                {EXAM_TERMS.map((term) => (
+                  <TouchableOpacity
+                    key={term}
+                    style={[
+                      styles.chip,
+                      analysisTerm === term && styles.chipSelected,
+                    ]}
+                    onPress={() => {
+                      setAnalysisTerm(term);
+                      if (analysisLevel) {
+                        refreshAnalysisForFilters(analysisLevel, term);
+                      }
+                    }}
+                  >
+                    <Text
+                      style={[
+                        styles.chipText,
+                        analysisTerm === term && styles.chipTextSelected,
+                      ]}
+                    >
+                      {term}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
             </View>
             {/* Search Bar */}
             <View style={{ flexDirection: 'row', alignItems: 'center', margin: 16 }}>
@@ -1066,9 +1556,59 @@ export default function App() {
             <TouchableOpacity
               style={{ margin: 16, alignSelf: 'center', backgroundColor: AppTheme.accent[0], borderRadius: 8, padding: 12 }}
               onPress={saveAnalysisToDevice}
+              disabled={uploadingToCloud}
             >
               <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 16 }}>Save Analysis to Device</Text>
             </TouchableOpacity>
+
+            <TouchableOpacity
+              style={{
+                marginHorizontal: 16,
+                marginBottom: 8,
+                alignSelf: 'center',
+                backgroundColor: AppTheme.success,
+                borderRadius: 8,
+                padding: 12,
+                minWidth: 260,
+                alignItems: 'center',
+                opacity: uploadingToCloud ? 0.7 : 1,
+              }}
+              onPress={() =>
+                analysisLevel &&
+                analysisTerm &&
+                handleUploadToDatabase(analysisLevel, analysisTerm, true)
+              }
+              disabled={uploadingToCloud || !analysisLevel || !analysisTerm}
+            >
+              {uploadingToCloud ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 16 }}>
+                  Upload Results to Database
+                </Text>
+              )}
+            </TouchableOpacity>
+            {analysisLevel && analysisTerm ? (
+              <Text style={styles.uploadHintText}>
+                {(() => {
+                  const pending = getResultsForClass(
+                    storedResults,
+                    analysisLevel,
+                    analysisTerm
+                  ).filter((result) => !result.uploadedToCloud).length;
+                  const total = getResultsForClass(
+                    storedResults,
+                    analysisLevel,
+                    analysisTerm
+                  ).length;
+                  return pending > 0
+                    ? `${pending} of ${total} result(s) ready to upload for ${analysisLevel}, ${analysisTerm}`
+                    : total > 0
+                      ? `All ${total} result(s) uploaded for ${analysisLevel}, ${analysisTerm}`
+                      : `No results to upload for ${analysisLevel}, ${analysisTerm}`;
+                })()}
+              </Text>
+            ) : null}
 
             <ScrollView
               style={styles.analysisScrollView}
@@ -1139,11 +1679,17 @@ export default function App() {
                     {examsToShow.map((exam, index) => (
                       <View key={exam.id} style={styles.recentExamCard}>
                         <View style={styles.recentExamHeader}>
-                          <Text style={styles.recentExamNumber}>
-                            {exam.candidate_number
-                              ? `Index: ${exam.candidate_number}`
-                              : `#${analysisData.totalExams - index}`}
-                          </Text>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.recentExamNumber}>
+                              {exam.candidate_number
+                                ? `Index: ${exam.candidate_number}`
+                                : `#${analysisData.totalExams - index}`}
+                            </Text>
+                            <Text style={styles.recentExamMeta}>
+                              {exam.level}, {exam.term}
+                              {exam.uploadedToCloud ? " • ☁️ Uploaded" : ""}
+                            </Text>
+                          </View>
                           <Text style={styles.recentExamDate}>
                             {new Date(exam.timestamp).toLocaleDateString()}
                           </Text>
@@ -1382,6 +1928,40 @@ export default function App() {
     );
   };
 
+  const renderChipSelector = <T extends string>(
+    label: string,
+    options: readonly T[],
+    selected: T | "",
+    onSelect: (value: T) => void
+  ) => (
+    <View style={styles.inputCard}>
+      <Text style={styles.inputLabel}>{label}</Text>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.chipRow}
+      >
+        {options.map((option) => {
+          const isSelected = selected === option;
+          return (
+            <TouchableOpacity
+              key={option}
+              style={[styles.chip, isSelected && styles.chipSelected]}
+              onPress={() => onSelect(option)}
+              activeOpacity={0.8}
+            >
+              <Text
+                style={[styles.chipText, isSelected && styles.chipTextSelected]}
+              >
+                {option}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+    </View>
+  );
+
   const renderSetup = () => {
     return (
       <View style={styles.safeArea}>
@@ -1395,18 +1975,40 @@ export default function App() {
               contentContainerStyle={styles.container}
               showsVerticalScrollIndicator={false}
             >
-              <TouchableOpacity
-                style={styles.closeButton}
-                onPress={() => router.back()}
-              >
-                <MaterialIcons name="arrow-back" size={24} color="white" />
-              </TouchableOpacity>
+              <View style={styles.topBar}>
+                <TouchableOpacity
+                  style={styles.signOutButton}
+                  onPress={handleSignOut}
+                >
+                  <MaterialIcons name="logout" size={22} color="white" />
+                  <Text style={styles.signOutText}>Sign Out</Text>
+                </TouchableOpacity>
+              </View>
               <View style={styles.header}>
                 <Text style={styles.title}>MCQ Scanner Setup</Text>
+                {user?.displayName ? (
+                  <Text style={styles.userGreeting}>
+                    Signed in as {user.displayName}
+                  </Text>
+                ) : null}
               </View>
 
               <View style={styles.formSection}>
                 <Text style={styles.sectionTitle}>📝 Exam Configuration</Text>
+
+                {renderChipSelector(
+                  "Class Level",
+                  EXAM_LEVELS,
+                  selectedLevel,
+                  setSelectedLevel
+                )}
+
+                {renderChipSelector(
+                  "Term",
+                  EXAM_TERMS,
+                  selectedTerm,
+                  setSelectedTerm
+                )}
 
                 <View style={styles.inputCard}>
                   <Text style={styles.inputLabel}>Number of Questions</Text>
@@ -1417,7 +2019,14 @@ export default function App() {
                     keyboardType="number-pad"
                     value={questions}
                     onChangeText={txt => {
-                      setQuestions(txt.replace(/[^0-9]/g, ''));
+                      const cleaned = txt.replace(/[^0-9]/g, "");
+                      setQuestions(cleaned);
+                      const qNum = Number.parseInt(cleaned, 10);
+                      if (qNum >= 1 && qNum <= 60) {
+                        setAnswerInputs((prev) =>
+                          createAnswerKeySlots(qNum, prev, true)
+                        );
+                      }
                     }}
                   />
                 </View>
@@ -1480,12 +2089,74 @@ export default function App() {
                         View Analysis
                       </Text>
                       <Text style={styles.analysisButtonText}>
-                        {storedResults.length > 0
-                          ? `${storedResults.length} exam${
-                              storedResults.length > 1 ? "s" : ""
-                            } analyzed`
-                          : "No valid exams analyzed yet"}
+                        {selectedLevel && selectedTerm
+                          ? classResultsCount > 0
+                            ? `${classResultsCount} result${
+                                classResultsCount > 1 ? "s" : ""
+                              } for ${selectedLevel}, ${selectedTerm}`
+                            : `No results yet for ${selectedLevel}, ${selectedTerm}`
+                          : "Select class and term to view analysis"}
                       </Text>
+                    </LinearGradient>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.uploadCloudButton,
+                      uploadingToCloud && styles.uploadCloudButtonDisabled,
+                    ]}
+                    onPress={() =>
+                      selectedLevel &&
+                      selectedTerm &&
+                      handleUploadToDatabase(selectedLevel, selectedTerm)
+                    }
+                    disabled={
+                      uploadingToCloud || !selectedLevel || !selectedTerm
+                    }
+                    activeOpacity={0.8}
+                  >
+                    <LinearGradient
+                      colors={["#22c55e", "#16a34a"]}
+                      style={styles.analysisButtonGradient}
+                    >
+                      {uploadingToCloud ? (
+                        <ActivityIndicator color="#fff" />
+                      ) : (
+                        <>
+                          <Text style={styles.analysisButtonIcon}>☁️</Text>
+                          <Text style={styles.analysisButtonTitle}>
+                            Upload to Database
+                          </Text>
+                          <Text style={styles.analysisButtonText}>
+                            {selectedLevel && selectedTerm
+                              ? pendingUploadCount > 0
+                                ? `${pendingUploadCount} pending for ${selectedLevel}, ${selectedTerm}`
+                                : classResultsCount > 0
+                                  ? `All ${classResultsCount} uploaded for ${selectedLevel}, ${selectedTerm}`
+                                  : `No results for ${selectedLevel}, ${selectedTerm}`
+                              : "Select class and term first"}
+                          </Text>
+                        </>
+                      )}
+                    </LinearGradient>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.uploadCloudButton}
+                    onPress={openUploadedResults}
+                    activeOpacity={0.8}
+                  >
+                    <LinearGradient
+                      colors={[...AppTheme.primary]}
+                      style={styles.analysisButtonGradient}
+                    >
+                      <Text style={styles.analysisButtonIcon}>🗂️</Text>
+                      <Text style={styles.analysisButtonTitle}>
+                        View Uploaded Results
+                      </Text>
+                          <Text style={styles.analysisButtonText}>
+                            All uploaded results from Firebase, grouped by class and term
+                          </Text>
                     </LinearGradient>
                   </TouchableOpacity>
                 </View>
@@ -1497,12 +2168,21 @@ export default function App() {
     );
   };
 
+  if (authLoading || !user) {
+    return (
+      <View style={styles.authLoadingContainer}>
+        <ActivityIndicator size="large" color="#fff" />
+      </View>
+    );
+  }
+
   return (
     <>
       {showSetup && renderSetup()}
       {renderCamera()}
       {renderManualUpload()}
       {renderAnalysisModal()}
+      {renderUploadedResultsModal()}
     </>
   );
 }
@@ -1524,16 +2204,46 @@ const styles = StyleSheet.create({
     padding: 20,
   },
   header: {
-    flexDirection: "row",
     alignItems: "center",
     marginBottom: 30,
     paddingTop: 10,
+  },
+  topBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    marginBottom: 8,
+  },
+  signOutButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(255,255,255,0.12)",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    gap: 6,
+  },
+  signOutText: {
+    color: "white",
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  userGreeting: {
+    color: "rgba(255,255,255,0.8)",
+    fontSize: 14,
+    marginTop: 6,
+    textAlign: "center",
+  },
+  authLoadingContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: AppTheme.statusBar,
   },
   title: {
     fontSize: 28,
     fontWeight: "bold",
     color: "white",
-    flex: 1,
     textAlign: "center",
   },
   sectionTitle: {
@@ -1545,6 +2255,49 @@ const styles = StyleSheet.create({
   },
   formSection: {
     marginBottom: 30,
+  },
+  chipRow: {
+    flexDirection: "row",
+    flexWrap: "nowrap",
+    gap: 8,
+    paddingVertical: 4,
+  },
+  chip: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 20,
+    backgroundColor: "rgba(255,255,255,0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.25)",
+  },
+  chipSelected: {
+    backgroundColor: "rgba(139, 92, 246, 0.45)",
+    borderColor: "#c4b5fd",
+  },
+  chipText: {
+    color: "rgba(255,255,255,0.85)",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  chipTextSelected: {
+    color: "#fff",
+  },
+  analysisFilterSection: {
+    paddingHorizontal: 16,
+    paddingBottom: 8,
+  },
+  analysisFilterLabel: {
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: "700",
+    marginBottom: 10,
+  },
+  analysisFilterSubLabel: {
+    color: "rgba(255,255,255,0.75)",
+    fontSize: 13,
+    fontWeight: "600",
+    marginBottom: 6,
+    marginTop: 4,
   },
   inputCard: {
     backgroundColor: "rgba(255, 255, 255, 0.1)",
@@ -1604,6 +2357,45 @@ const styles = StyleSheet.create({
   // Analysis Section
   analysisSection: {
     marginTop: 20,
+    gap: 16,
+  },
+  uploadCloudButton: {
+    borderRadius: 16,
+    overflow: "hidden",
+  },
+  uploadCloudButtonDisabled: {
+    opacity: 0.7,
+  },
+  uploadHintText: {
+    color: "rgba(255,255,255,0.85)",
+    textAlign: "center",
+    marginBottom: 12,
+    paddingHorizontal: 16,
+    fontSize: 13,
+  },
+  cloudLoadingContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingVertical: 40,
+  },
+  cloudLoadingText: {
+    color: "rgba(255,255,255,0.85)",
+    marginTop: 12,
+    fontSize: 15,
+  },
+  cloudGroupSection: {
+    marginBottom: 20,
+    paddingHorizontal: 16,
+  },
+  cloudGroupTitle: {
+    color: "#fff",
+    fontSize: 18,
+    fontWeight: "700",
+    marginBottom: 12,
+  },
+  cloudResultsBody: {
+    flex: 1,
   },
   analysisButton: {
     borderRadius: 16,
@@ -1748,6 +2540,11 @@ const styles = StyleSheet.create({
     borderRadius: 25,
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.3)",
+  },
+  uploadTitle: {
+    color: "white",
+    fontSize: 16,
+    fontWeight: "700",
   },
   uploadContent: {
     flex: 1,
@@ -2191,6 +2988,11 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "bold",
     color: "white",
+  },
+  recentExamMeta: {
+    fontSize: 12,
+    color: "rgba(255, 255, 255, 0.75)",
+    marginTop: 2,
   },
   recentExamDate: {
     fontSize: 12,

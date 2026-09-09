@@ -1,0 +1,6 @@
+// Firebase security rules for MCQ Marker
+//
+// Apply in Firebase Console:
+// Firestore → Rules → paste contents of firestore.rules → Publish
+//
+// Firebase Storage is NOT used — images stay on the device only.

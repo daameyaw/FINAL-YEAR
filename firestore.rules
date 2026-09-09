@@ -1,0 +1,38 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default: deny everything unless a rule below allows it.
+
+    // Teacher profile (created on sign up)
+    match /users/{userId} {
+      allow read, write: if isSignedIn() && isOwner(userId);
+    }
+
+    // Scan results: teachers → levels → terms → results
+    match /teachers/{userId} {
+      allow read, write: if isSignedIn() && isOwner(userId);
+
+      match /levels/{levelId} {
+        allow read, write: if isSignedIn() && isOwner(userId);
+
+        match /terms/{termId} {
+          allow read, write: if isSignedIn() && isOwner(userId);
+
+          match /results/{resultId} {
+            allow read, write: if isSignedIn() && isOwner(userId);
+          }
+        }
+      }
+    }
+  }
+
+  function isSignedIn() {
+    return request.auth != null;
+  }
+
+  function isOwner(userId) {
+    return request.auth.uid == userId;
+  }
+}
